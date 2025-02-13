@@ -11,5 +11,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const cli_dep = b.dependency("zig-cli", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_mod = cli_dep.module("zig-cli");
+
+    exe.root_module.addImport("zig-cli", cli_mod);
+
     b.installArtifact(exe);
 }
