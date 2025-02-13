@@ -1,125 +1,139 @@
 const std = @import("std");
-const cli = @import("zig-cli");
+const cova = @import("cova");
 
-var config = struct {
-    init_path: []const u8 = undefined,
-    snapshot_comment: ?[]const u8 = null,
-    rollback_version: []const u8 = undefined,
-    rollback_path: []const u8 = undefined,
-    list_path: ?[]const u8 = null,
-}{};
+const CommandT = cova.Command.Custom(.{
+    .global_help_prefix = "Verdis - Version-controlled disk system",
+});
+
+const InitOptions = struct {
+    path: []const u8,
+};
+
+const SnapshotOptions = struct {
+    comment: ?[]const u8 = null,
+};
+
+const RollbackOptions = struct {
+    version: []const u8,
+    path: []const u8,
+};
+
+const ListOptions = struct {
+    path: ?[]const u8 = null,
+};
+
+fn handleRoot(cmd: *CommandT) !void {
+    // Show help when no subcommand provided
+    try cmd.help(std.io.getStdOut().writer());
+    return error.MissingSubcommand;
+}
+
+const root_cmd = CommandT.from(@TypeOf(handleRoot), .{
+    .cmd_name = "verdis",
+    .cmd_description = "Version-controlled storage system with snapshot capabilities",
+    .sub_descriptions = &.{
+        .{ "init", "Initialize new filesystem" },
+        .{ "snapshot", "Create new snapshot" },
+        .{ "rollback", "Restore path to version" },
+        .{ "list", "List versions/history" },
+    },
+    .sub_cmds = &.{
+        CommandT.from(InitOptions, .{
+            .cmd_name = "init",
+            .cmd_description = "Initialize new repository",
+            .value_refs = &.{
+                .{ .name = "path", .descritpion = "Path to initialize", .required = true },
+            },
+        }),
+        CommandT.from(SnapshotOptions, .{
+            .cmd_name = "snapshot",
+            .cmd_description = "Create new snapshot",
+            .value_refs = &.{
+                .{ .name = "comment", .descritpion = "Snapshot description", .short_name = 'c' },
+            },
+        }),
+        CommandT.from(RollbackOptions, .{
+            .cmd_name = "rollback",
+            .cmd_description = "Restore path to version",
+            .value_refs = &.{
+                .{ .name = "version", .descritpion = "Target version ID", .required = true },
+                .{ .name = "path", .descritpion = "Path to restore", .required = true },
+            },
+        }),
+        CommandT.from(ListOptions, .{
+            .cmd_name = "list",
+            .cmd_description = "List versions/history",
+            .value_refs = &.{
+                .{ "path", "Path to inspect (optional)" },
+            },
+        }),
+    },
+    .action = .{ .handler = handleRoot }, // Connect root handler
+});
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    var r = try cli.AppRunner.init(allocator);
-    defer r.deinit();
 
-    const init_cmd = cli.Command{
-        .name = "init",
-        .description = "Initialize new filesystem",
-        .options = try r.allocOptions(&.{
-            .{
-                .long_name = "path",
-                .help = "Path to initialize",
-                .required = true,
-                .value_ref = r.mkRef(&config.init_path),
-            },
-        }),
-        .target = .{ .action = .{ .exec = handleInit } },
-    };
+    var cmd = try root_cmd.init(allocator, .{});
+    defer cmd.deinit();
 
-    const snapshot_cmd = cli.Command{
-        .name = "snapshot",
-        .description = "Create new snapshot",
-        .options = try r.allocOptions(&.{
-            .{
-                .long_name = "comment",
-                .short_name = 'c',
-                .help = "Snapshot description",
-                .value_ref = r.mkRef(&config.snapshot_comment),
-            },
-        }),
-        .target = .{ .action = .{ .exec = handleSnapshot } },
-    };
+    var args_iter = try cova.ArgIteratorGeneric.init(allocator);
+    defer args_iter.deinit();
 
-    const rollback_cmd = cli.Command{
-        .name = "rollback",
-        .description = "Restore path to version",
-        .options = try r.allocOptions(&.{
-            .{
-                .long_name = "version",
-                .help = "Target version ID",
-                .required = true,
-                .value_ref = r.mkRef(&config.rollback_version),
-            },
-            .{
-                .long_name = "path",
-                .help = "Path to restore",
-                .required = true,
-                .value_ref = r.mkRef(&config.rollback_path),
-            },
-        }),
-        .target = .{ .action = .{ .exec = handleRollback } },
-    };
+    try cova.parseArgs(&args_iter, CommandT, &cmd, std.io.getStdOut().writer(), .{});
 
-    const list_cmd = cli.Command{
-        .name = "list",
-        .description = "List versions/history",
-        .options = try r.allocOptions(&.{
-            .{
-                .long_name = "path",
-                .help = "Path to inspect (optional)",
-                .value_ref = r.mkRef(&config.list_path),
-            },
-        }),
-        .target = .{ .action = .{ .exec = handleList } },
-    };
-
-    const app = cli.App{
-        .command = .{
-            .name = "verdis",
-            .description = "Version-controlled disk system",
-            .subcommands = try r.allocCommands(&.{
-                init_cmd,
-                snapshot_cmd,
-                rollback_cmd,
-                list_cmd,
-            }),
-        },
-    };
-
-    try r.run(&app);
+    // Execute the matched command
+    if (cmd.hasSubCmd()) {
+        try handleCommand(cmd);
+    } else {
+        try handleRoot(cmd); // Handle bare 'verdis' command
+    }
 }
 
-fn handleInit() !void {
-    std.debug.print("Initializing repository at: {s}\n", .{config.init_path});
-    // TODO: Write to image file/device.
-    // TODO: Generate genesis version ID.
+fn handleCommand(cmd: *CommandT) !void {
+    if (cmd.matchSubCmd("init")) |subcmd| {
+        const opts = try subcmd.to(InitOptions, .{});
+        return handleInit(opts);
+    }
+    if (cmd.matchSubCmd("snapshot")) |subcmd| {
+        const opts = try subcmd.to(SnapshotOptions, .{});
+        return handleSnapshot(opts);
+    }
+    if (cmd.matchSubCmd("rollback")) |subcmd| {
+        const opts = try subcmd.to(RollbackOptions, .{});
+        return handleRollback(opts);
+    }
+    if (cmd.matchSubCmd("list")) |subcmd| {
+        const opts = try subcmd.to(ListOptions, .{});
+        return handleList(opts);
+    }
 }
 
-fn handleSnapshot() !void {
-    const comment = config.snapshot_comment orelse "no comment";
+fn handleInit(opts: InitOptions) !void {
+    std.debug.print("Initializing repository at: {s}\n", .{opts.path});
+    // TODO: Write to image file/device
+}
+
+fn handleSnapshot(opts: SnapshotOptions) !void {
+    const comment = opts.comment orelse "no comment";
     std.debug.print("Creating snapshot: {s}\n", .{comment});
-    // TODO: Capture current state.
-    // TODO: Generate version ID.
+    // TODO: Capture current state
 }
 
-fn handleRollback() !void {
+fn handleRollback(opts: RollbackOptions) !void {
     std.debug.print("Rolling back {s} to version {s}\n", .{
-        config.rollback_path,
-        config.rollback_version,
+        opts.path,
+        opts.version,
     });
-    // TODO: Validate version exists.
-    // TODO: Restore file/directory state.
+    // TODO: Validate version exists
 }
 
-fn handleList() !void {
-    if (config.list_path) |path| {
-        std.debug.print("Showing history for: {s}", .{path});
-        // TODO: Display version history for path.
+fn handleList(opts: ListOptions) !void {
+    if (opts.path) |path| {
+        std.debug.print("Showing history for: {s}\n", .{path});
     } else {
         std.debug.print("Listing all versions:\n", .{});
-        // TODO: Display all snapshots.
+        // TODO: List all snapshots
     }
 }
